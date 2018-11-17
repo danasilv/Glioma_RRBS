@@ -1,0 +1,275 @@
+---
+title: "compareRRSBnRNAseq"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+## R Markdown
+library(Seurat)
+library(dplyr)
+library(Matrix)
+library(plotrix)
+library(useful)
+
+tumor_name = "MGH105B"
+RRBSpath <- paste0("/Volumes/broad_regevtmp/dsilverb/STARRgrant/alignreads/",tumor_name,"/RNAseq_Pipeline/",tumor_name,".rsem.genes.tpm.matrix")
+GBM2path <- paste0("/Volumes/ahg_regevdata/projects/Glioma_scGenetics/alignreads/VolkerAlign/",tumor_name,"/RNAseq_Pipeline/",tumor_name,".rsem.genes.tpm.matrix")
+figures.dir <- "/Volumes/broad_regevtmp/dsilverb/STARRgrant/figures/compareRRSBnRNAseq/"
+signature.dir = "/Volumes/ahg_regevdata/projects/Glioma_scGenetics/resources/genesignatures/"
+resources.dir =  "/Volumes/broad_regevtmp/dsilverb/STARRgrant/resources/"
+results.dir =  "/Volumes/broad_regevtmp/dsilverb/STARRgrant/results/compareRRSBnRNAseq/"
+```
+
+
+```{r combine RRSB and GBM plates}
+# Read the RNA from the GBM2 paper and the RNA sequences by Landau group and combine
+RRBSplate = read.table(RRBSpath, sep="\t", header = TRUE, row.names=1)
+GBM2plate = read.table(GBM2path, sep="\t", header = TRUE, row.names=1)
+tumor.plates <- cbind(GBM2plate, RRBSplate)
+
+# Create Seurat
+tumor <- CreateSeuratObject(raw.data = cbind(tumor.plates), min.cells = 3, min.genes = 400, project = "Cellline_Plate3")
+
+# Mitochondrial genes
+mito.genes <- grep(pattern = "^mt-", x = rownames(x = tumor@data), value = TRUE, ignore.case = T)
+percent.mito <- Matrix::colSums(tumor@raw.data[mito.genes, ]) / Matrix::colSums(tumor@raw.data)
+tumor <- AddMetaData(object = tumor, metadata = percent.mito, col.name = "percent.mito")
+
+# House keeping genes (list from Itay Tirosh)
+hkgenes <- read.table("/Volumes/ahg_regevdata/projects/Glioma_scGenetics/resources/tirosh_house_keeping.txt", skip = 2)
+hkgenes <- as.vector(hkgenes$V1)
+hkgenes.found <- which(toupper(rownames(tumor@data)) %in% hkgenes)  # remove hkgenes that were not found
+n.expressed.hkgenes <- Matrix::colSums(tumor@data[hkgenes.found, ] > 0)
+tumor <- AddMetaData(object = tumor, metadata = n.expressed.hkgenes, col.name = "n.exp.hkgenes")
+
+VlnPlot(object = tumor, features.plot = c("nGene"))
+ggsave(paste0(figures.dir, tumor_name,'.nGene.png'), width = 10, height = 3)
+#VlnPlot(object = tumor, features.plot = c("percent.mito"))
+#ggsave(paste0(figures.path, tumor,'.percentMt.png'), width = 10, height = 3)
+VlnPlot(object = tumor, features.plot = c("n.exp.hkgenes"))
+ggsave(paste0(figures.dir, tumor_name,'.nexphkgenes.png'), width = 10, height = 3)
+
+GenePlot(object = tumor, gene1 = "nGene", gene2 = "n.exp.hkgenes")
+ggsave(paste0(figures.dir, tumor_name,'.nGenevhkgenes.png'), width = 5, height = 4)
+
+```
+
+
+```{r compare QCs?}
+```
+
+
+```{r filter}
+tumor <- FilterCells(object = tumor, subset.names = c("nGene", "n.exp.hkgenes"),low.thresholds = c(3000, 50), high.thresholds = c(Inf, Inf))
+```
+
+
+```{r cluster}
+
+tumor <- NormalizeData(object = tumor, normalization.method = "LogNormalize", scale.factor = 100000)
+tumor <- FindVariableGenes(tumor, mean.function = ExpMean, dispersion.function = LogVMR, x.low.cutoff = 0.1, x.high.cutoff = 7, y.cutoff = 1, do.plot = FALSE)
+VariableGenePlot(tumor, plot.both = TRUE)
+meanvar <- plot_grid(p1, p2, align = 'h', labels = c('A', 'B'))
+ggsave(paste0(figures.dir, tumor_name, '.meanvar.png'), width = 5, height = 4)
+tumor <- ScaleData(tumor, do.center = TRUE, do.scale = FALSE)
+tumor <- RunPCA(object = tumor, pc.genes = tumor@var.genes, do.print = TRUE, pcs.print = 1:5, genes.print = 5)
+PCAPlot(object = tumor, dim.1 = 1, dim.2 = 2)
+
+```
+
+
+
+```{r}
+PCAPlot(object = tumor, dim.1 = 1, dim.2 = 2)
+```
+
+```{r}
+tumor <- ProjectPCA(object = tumor, do.print = FALSE)
+tumor <- JackStraw(object = tumor, num.replicate = 100)
+```
+
+```{r}
+JackStrawPlot(object = tumor, PCs = 1:12)
+```
+
+```{r}
+PCElbowPlot(object = tumor)
+```
+```{r}
+PCHeatmap(object = tumor, pc.use = 1:8, do.balanced = TRUE, 
+    label.columns = FALSE, use.full = FALSE)
+```
+```{r}
+# save.SNN = T saves the SNN so that the clustering algorithm can be rerun
+# using the same graph but with a different resolution value (see docs for
+# full details)
+tumor <- FindClusters(object = tumor, reduction.type = "pca", dims.use = 1:5, 
+    resolution = c(0.4, 0.8, 1.2), print.output = 0, save.SNN = TRUE, force.recalc = TRUE)
+```
+
+```{r tSNE}
+tumor <- RunTSNE(object = tumor, perplexity = 20)
+pdf(paste0(figures.dir,"tSNE_clusters.pdf"))
+TSNEPlot(object = tumor)
+dev.off()
+TSNEPlot(object = tumor)
+
+```
+
+```{r RSSB cells cluster with the GBM2 cells}
+plate.names <- unlist(lapply(strsplit(tumor@cell.names, "_"), function(x) x[2]))
+vec.plate.names <- (as.vector(plate.names))
+names(vec.plate.names) <- tumor@cell.names
+tumor <- AddMetaData(object = tumor, metadata = vec.plate.names, col.name = "plate")
+tumor <- StashIdent(tumor, save.name = "cluster")
+tumor <- SetAllIdent(object = tumor, id = "plate")
+pdf(paste0(figures.dir,"tSNE_byPlates_P6RRBS_P2P3GBM2.pdf"))
+TSNEPlot(object = tumor)
+dev.off()
+TSNEPlot(object = tumor)
+```
+
+```{r ToDo plot with QC - number of genes for example}
+pdf(paste0(figures.dir,"tSNE_colorbyQC.pdf"))
+FeaturePlot(object = tumor, features.plot = c("nGene","n.exp.hkgenes"), cols.use = c("grey", "blue"), reduction.use = "tsne")
+dev.off()
+FeaturePlot(object = tumor, features.plot = c("nGene","n.exp.hkgenes"), cols.use = c("grey", "blue"), reduction.use = "tsne")
+```
+
+```{r project Itay's normal cells}
+GBM2.normal.cells = read.table(paste0(resources.dir,"nonmalignant.logtpm.csv"), sep=",", header = TRUE)
+gene.names.GBM2.normal.cells = read.table(paste0(resources.dir,"gene_order.csv"), sep=",", header = TRUE)
+GBM2.normal.cell.names <- colnames(GBM2.normal.cells)
+GBM2.normal.cell.names <- str_replace_all(GBM2.normal.cell.names,"\\.","_")
+vec.GBM2.nonmalignant <- as.vector(tumor@cell.names %in% GBM2.normal.cell.names)
+names(vec.GBM2.nonmalignant) <- tumor@cell.names
+tumor <- AddMetaData(object = tumor, metadata = vec.GBM2.nonmalignant, col.name = "GBM2.nonmalignant")
+tumor <- SetAllIdent(object = tumor, id = "GBM2.nonmalignant")
+pdf(paste0(figures.dir,"tSNE_GBM2_nonmalignant.pdf"))
+TSNEPlot(object = tumor)
+dev.off()
+TSNEPlot(object = tumor)
+```
+```{r what are the non-malignant cells according to this?}
+
+```
+
+```{r inferCNV}
+gencode = read.table(paste0(resources.dir,"/gencode_v19_gene_pos.txt"))
+centromeres = read.table(paste0(resources.dir,"/Centromeres.txt"))
+
+# Consider removeing genes with mean expression below a cutoff (Kevin uses 4)
+
+# Ask Kevin - do I need to manipulate the data? normalize/center it? I do believe it's already logged scale
+#tpm.for.cnv = list()
+#tpm.for.cnv[[1]] = as.matrix(tumor@data)
+#tpm.for.cnv[[2]] = unlist(lapply(strsplit(tumor@cell.names, "_"), function(x) x[1]))
+#names(tpm.for.cnv) = c("TPM", "sample_ident")
+t.df.tumor.data <- as.data.frame(as.matrix(t(tumor@data)))
+df.tumor.data <- as.data.frame(as.matrix((tumor@data)))
+ECNV_smoothed = infer.cnv(df.tumor.data, gencode)
+
+#Find oligos.
+oligo.markers <- c("MBP", "MOBP", "MOG", "PLP1")
+oligo.markers <- intersect(colnames(t.df.tumor.data),oligo.markers)
+oligo = dplyr::mutate((t.df.tumor.data), cell = rownames((t.df.tumor.data))) %>%
+        dplyr::select(cell,oligo.markers)  # ToDo; find a way to intersect with the genes in the dataframe
+oligo = data.frame(oligo, oligo_score = rowMeans(oligo[,2:(length(oligo.markers) + 1)]))  
+rownames(oligo) = oligo$cell
+oligo = dplyr::select(oligo, -cell)
+
+#Cell names for oligos
+oligo_names = rownames(oligo)[oligo$oligo_score >= 4]
+
+#ToDo - plot oligos on the tSNE
+
+#find immune cells
+immune.markers <- c("CD53", "CD74", "CSF1R", "AIF1", "HLA.DRA", "FCGR2A", "P2RY12", "PTPRC", "TYROBP", "CLDN11")
+immune.markers <- intersect(colnames(t.df.tumor.data),immune.markers)
+immune = dplyr::mutate(t.df.tumor.data, cell = rownames(t.df.tumor.data)) %>%
+        dplyr::select(cell, immune.markers)
+immune = data.frame(immune, immune_score = rowMeans(immune[,2:(length(immune.markers) + 1)])) 
+rownames(immune) = immune$cell
+immune = dplyr::select(immune, -cell)
+
+#Cell names for APCs
+immune_names = rownames(immune)[immune$immune_score > 4]
+
+#TSNE by immune score.
+
+# ToDo - tSNE by immune cells
+
+
+#define malignant cells as those that are not "oligo" or "immune" by gene expression.
+non_malignant = c(oligo_names,immune_names)
+malignant = as.character(colnames(tumor@data)[!(colnames(tumor@data) %in% non_malignant)])
+
+#First iteration of correction, using non-malignant cells defined by gene expression only.
+ECNV_smoothed_corrected = baseline.correction(ECNV_smoothed, malignant,
+                                              oligo_names, immune_names, method = "both", output = "all")
+
+#id.malignant is run after subtracting of non-malignant cells by gene expression.
+id_malignant = id.malignant(ECNV_smoothed_corrected, malignant,
+                         sample_ident, plot_path = figures.dir, genes_cn = 0,
+                         signal_cutoff = 0.005, correlation_cutoff = 0.1)
+
+#Oligo = oligo by gene expression, not malignant by id.malignant.
+#Immune = immune by gene expression, not malignant by id.malignant.
+oligo = intersect(oligo_names, id_malignant$Cell[!id_malignant$Malignant]) #previously 228 oligos, now 215.
+immune = intersect(immune_names, id_malignant$Cell[!id_malignant$Malignant]) #previously 118 immune cells, now 117.
+
+#Redefine malignant cells as those that are not "oligo" or "immune".
+non_malignant = c(oligo,immune) #332 non-malignant cells total.
+
+#This is a strict criteria for "malignant cells".
+malignant = id_malignant$Cell[id_malignant$Malignant] #2159 malignant cells.
+malignant = malignant[!(malignant %in% non_malignant)] #2159 malignant cells.
+
+#Second iteration of correction, using non-malignant cells defined by gene expression and CNV signals.
+ECNV_smoothed_corrected = baseline.correction(ECNV_smoothed, malignant, oligo, immune, method = "both", output = "all") 
+        
+#Re-assign the sample identity of non-malignant cells, for plotting purposes.
+cell_names = colnames(ECNV_smoothed_corrected)[-c(1:4)]
+sample_ident = unlist(lapply(str_split(cell_names, "_"), function(x) x[1]))
+sample_ident[cell_names %in% oligo] = "Oligodendrocyte"
+sample_ident[cell_names %in% immune] = "Immune"
+sample_ident = as.factor(sample_ident)
+
+#Place Oligodendrocyte and Immune as the first levels
+sample_ident = factor(sample_ident, levels(sample_ident)[c(2,1)]) # Reorder the levels to have oligo and immune first
+
+#Re-order data for plotting purposes.
+# I dont understand the sorting. We sorted only sample_ident - how does it change also the ECNV?
+ECNV_smoothed_corrected_sorted = sort.subclones(ECNV_smoothed_corrected, sample_ident, results_path,gencode = gencode, centromeres = centromeres,skip_first_n_samples = 1)
+
+#Since the data has been ordered, the sample identity also needs to be ordered.
+sample_ident = sample_ident[order(sample_ident)]
+
+#Plotting.
+#Define colours for plotting
+#colours = brewer.pal(length(unique(sample_ident)), "Spectral")
+#names(colours) = unique(sample_ident)
+#colours = list(Sample = colours)
+pdf(paste0(figures.dir,tumor_name,"_CNV.pdf"))
+plot.cnv (ECNV_smoothed_corrected[,c(c(1,2,3,4),order(sample_ident) + 4)], sort(sample_ident), genes_cn = 0,  noise_filter = 0.2)
+dev.off()
+```
+
+```{r project the non-malignant cells on the tSNE}
+vec.CNV.nonmalignant <- as.vector(tumor@cell.names %in% non_malignant)
+names(vec.CNV.nonmalignant) <- tumor@cell.names
+tumor <- AddMetaData(object = tumor, metadata = vec.CNV.nonmalignant, col.name = "CNV.nonmalignant")
+tumor <- SetAllIdent(object = tumor, id = "CNV.nonmalignant")
+pdf(paste0(figures.dir,"tSNE_CNV_nonmalignant.pdf"))
+TSNEPlot(object = tumor)
+dev.off()
+TSNEPlot(object = tumor)
+```
+
+```{r save malignant and non-malignant cell names}
+write.csv(tumor@cell.names[tumor@meta.data$cluster == "3"], file = paste0(results.dir,tumor_name,"_nonmalignant.csv"))
+write.csv(tumor@cell.names[tumor@meta.data$cluster != "3"], file = paste0(results.dir,tumor_name,"_malignant.csv"))
+write.csv(tumor@cell.names[(tumor@meta.data$cluster == "3") & (tumor@meta.data$plate == "P6")], file = paste0(results.dir,tumor_name,"_P6_nonmalignant.csv"))
+write.csv(tumor@cell.names[(tumor@meta.data$cluster != "3") & (tumor@meta.data$plate == "P6")], file = paste0(results.dir,tumor_name,"_P6_malignant.csv"))
+```
